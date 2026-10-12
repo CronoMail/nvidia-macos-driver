@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+*.bin
+nullmoth-rtx3060-working-fixes-*.zip
+release-dist/
+upstream-payload.tar.gz
+pkgroot/
