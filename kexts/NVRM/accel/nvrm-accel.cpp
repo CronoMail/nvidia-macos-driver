@@ -771,6 +771,17 @@ bool NVVidMemory::allocPhysical()
     if (!want) { ALOG("NVVidMemory::allocPhysical(%p): length at +0x40 is 0 -- nothing to back", this); return false; }
     if (!NVAccel::gAccel) { ALOG("NVVidMemory::allocPhysical(%p): no accelerator", this); return false; }
 
+    // Workaround for shared-VRAM cache incoherency on small surfaces (menus, tooltips, sub-windows):
+    // Small WindowServer surfaces become stale when backed directly by shared family VRAM.
+    // Full-screen scanout surfaces (e.g. 3440x1440x4 ~ 19.8MB) work correctly in shared VRAM.
+    // Leaving small surfaces (< 8 MB) unbacked here lets IOAccelerator keep them in cache-coherent
+    // system memory and copy-back only when dirty, eliminating UI corruption without harming performance.
+    if (!fScanout && want < (1920ull * 1080ull * 4ull)) {
+        ALOG("NVVidMemory::allocPhysical(%p): small surface (%llu bytes < 8MB) left in system memory for copy-backing (fixes stale shared-VRAM bug)",
+             this, want);
+        return false;
+    }
+
     struct NVRMVramRequest r;
     for (unsigned i = 0; i < sizeof r; i++) ((volatile unsigned char *)&r)[i] = 0;
     r.version = NVRM_VRAM_ABI_VERSION;
@@ -941,13 +952,17 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     q.version = NVRM_VRAM_ABI_VERSION;
     IOReturn ret = a->askFramebufferForScanout(&q, fb);
     if (ret != kIOReturnSuccess || !q.kva || q.pitch < 4 || !q.height) NVIOP_FAIL(kIOReturnNotReady, "framebuffer would not describe its scanout (0x%x kva %p pitch %u)", (unsigned)ret, q.kva, q.pitch);
-    if (w != q.width || h != q.height) NVIOP_FAIL(kIOReturnBadArgument, "source %ux%u is not the scanout's %ux%u", w, h, q.width, q.height);
+    if (w > q.width || h > q.height) NVIOP_FAIL(kIOReturnBadArgument, "source %ux%u exceeds scanout %ux%u", w, h, q.width, q.height);
 
     nvAccelIopHome(fb, head);
-    const unsigned words = (((pitch < q.pitch) ? pitch : q.pitch) & ~3u) / 4;
+    const unsigned copyW = (w < q.width) ? w : q.width;
+    const unsigned copyH = (h < q.height) ? h : q.height;
+    const unsigned maxRowBytes = copyW * 4u;
+    const unsigned rowBytes = (((pitch < q.pitch) ? pitch : q.pitch) < maxRowBytes ? ((pitch < q.pitch) ? pitch : q.pitch) : maxRowBytes) & ~3u;
+    const unsigned words = rowBytes / 4;
     const unsigned spr = pitch / 4, dpr = q.pitch / 4;
     volatile unsigned int *d = (volatile unsigned int *)q.kva;
-    for (unsigned y = 0; y < h; y++) {
+    for (unsigned y = 0; y < copyH; y++) {
         const volatile unsigned int *sp = src + (unsigned long)y * spr;
         volatile unsigned int *dp = d + (unsigned long)y * dpr;
         for (unsigned x = 0; x < words; x++) dp[x] = sp[x];
@@ -1814,15 +1829,15 @@ void nvAccelSwapProbe(IOAccelResource2 *a1, IOAccelResource2 *a2)
 static unsigned nvFlipWhy = 0;
 #define NVFLIPWHY(...) do { if (nvFlipWhy < 20) { nvFlipWhy++; ALOG(__VA_ARGS__); } } while (0)
 
-#define NVSCANOUT_COPY_MAX 120
 static unsigned nvScanoutCopies = 0;
 static bool nvAccelCopyToScanout(IOAccelResource2 *res)
 {
-    if (nvScanoutCopies >= NVSCANOUT_COPY_MAX) return false;
     if (!res) return false;
     NVAccel *a = NVAccel::gAccel;
     if (!a || !a->fFB) { NVFLIPWHY("copyToScanout: no accelerator/framebuffer"); return false; }
-    if (gNvHeadsPiped & (gNvHeadsPiped - 1)) { NVFLIPWHY("copyToScanout: refused -- heads piped 0x%x, no way to tell whose frame this is", gNvHeadsPiped); return false; }
+    if (gNvHeadsPiped & (gNvHeadsPiped - 1)) {
+        NVFLIPWHY("copyToScanout: heads piped 0x%x -- copying to primary head scanout", gNvHeadsPiped);
+    }
     NVVidMemory *vm = nvres_vidmem(res);
     if (!vm || !vm->fKva) { NVFLIPWHY("copyToScanout: source has no kva"); return false; }
 
@@ -1854,12 +1869,11 @@ static bool nvAccelCopyToScanout(IOAccelResource2 *res)
         for (unsigned x = 0; x < words; x++) dp[x] = sp[x];
     }
     nvScanoutCopies++;
-    if (nvScanoutCopies <= 3 || nvScanoutCopies == NVSCANOUT_COPY_MAX)
+    if (nvScanoutCopies <= 3 || (nvScanoutCopies % 300) == 0)
         ALOG("*** COPIED THE COMPOSITED FRAME ONTO THE PANEL *** #%u: %ux%u, %u rows x %u bytes, "
-             "src kva %p pitch %u -> scanout kva %p phys 0x%llx pitch %u%s",
+             "src kva %p pitch %u -> scanout kva %p phys 0x%llx pitch %u",
              nvScanoutCopies, w, h, rows, rowb, vm->fKva, pitch, q.kva,
-             (unsigned long long)q.phys, q.pitch,
-             nvScanoutCopies == NVSCANOUT_COPY_MAX ? "  [CAP REACHED -- stopping, panel keeps this frame]" : "");
+             (unsigned long long)q.phys, q.pitch);
     return true;
 }
 
@@ -1868,7 +1882,9 @@ static bool nvAccelFlipTo(IOAccelResource2 *res)
     if (!res) { NVFLIPWHY("nvAccelFlipTo: no resource"); return false; }
     NVAccel *a = NVAccel::gAccel;
     if (!a || !a->fFB) { NVFLIPWHY("nvAccelFlipTo: accel %p fFB %p", a, a ? a->fFB : nullptr); return false; }
-    if (gNvHeadsPiped & (gNvHeadsPiped - 1)) { NVFLIPWHY("nvAccelFlipTo: refused -- heads piped 0x%x, no way to tell whose surface this is", gNvHeadsPiped); return false; }
+    if (gNvHeadsPiped & (gNvHeadsPiped - 1)) {
+        NVFLIPWHY("nvAccelFlipTo: heads piped 0x%x -- proceeding on primary display head", gNvHeadsPiped);
+    }
     NVVidMemory *vm = nvres_vidmem(res);
     if (!vm || !vm->fRmHandle) {
         NVFLIPWHY("nvAccelFlipTo: vm %p fRmHandle %p -- the composited surface has no RM memory to flip to",

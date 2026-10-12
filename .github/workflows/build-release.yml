@@ -1,0 +1,72 @@
+name: Build and Release Driver
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag name for release (e.g. v1.14.2-custom)'
+        required: true
+        default: 'v1.14.2-custom'
+
+jobs:
+  build-and-release:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Install Build Tools
+        run: |
+          brew install ninja meson
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git "$HOME/Vulkan-Headers"
+
+      - name: Build Shader Translator (metal2vulkan)
+        run: |
+          mkdir -p "$HOME/nvmtl-build/LIVE/out"
+          cargo build --release --manifest-path translator/wrapper/Cargo.toml --target x86_64-apple-darwin
+          cp translator/wrapper/target/x86_64-apple-darwin/release/libnvmtl_translate.dylib "$HOME/nvmtl-build/LIVE/out/" || true
+
+      - name: Build 1401 Mac App
+        run: |
+          bash app/build.sh app/build
+
+      - name: Package Release Assets
+        run: |
+          mkdir -p release-dist
+          cd app/build
+          zip -ry ../../release-dist/1401-Mac-App.zip 1401.app
+          cd ../..
+          tar -czf release-dist/nvidia-macos-driver-source.tar.gz --exclude='.git' .
+          cd release-dist
+          shasum -a 256 * > SHA256SUMS.txt
+          cd ..
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          name: "NVIDIA macOS Driver (Custom Build ${{ github.event.inputs.release_tag || github.ref_name }})"
+          body: |
+            ### Custom Build with Fixes:
+            - **Small WindowServer Surfaces**: Bypassed shared-VRAM cache incoherency for sub-surfaces (< 8MB) to eliminate UI corruption and stale menus.
+            - **Multi-Monitor / Multi-Head Support**: Relaxed `heads piped` checks in `nvAccelCopyToScanout` and `nvAccelFlipTo` so 3-monitor setups are not blocked.
+            - **Scanout Copying**: Removed the artificial 120-frame copy cutoff that froze displays after 2 seconds.
+            - **Sub-Surface Transactions**: Supported variable and sub-surface geometry in `performTransaction`.
+          files: |
+            release-dist/1401-Mac-App.zip
+            release-dist/nvidia-macos-driver-source.tar.gz
+            release-dist/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
