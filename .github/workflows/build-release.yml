@@ -38,19 +38,38 @@ jobs:
           cargo build --release --manifest-path translator/wrapper/Cargo.toml --target x86_64-apple-darwin
           cp translator/wrapper/target/x86_64-apple-darwin/release/libnvmtl_translate.dylib "$HOME/nvmtl-build/LIVE/out/" || true
 
-      - name: Build 1401 Mac App
+      - name: Fetch and Patch Driver Payload
         run: |
+          mkdir -p release-dist
+          echo "Downloading official upstream 1.14.2 package..."
+          curl -fsSL https://github.com/nullmoth/nvidia-macos-driver/releases/download/v1.14.2/nullmoth-nvidia-1.14.2.tar.gz -o upstream-payload.tar.gz
+          tar -xzf upstream-payload.tar.gz
+          echo "Applying binary patches to kexts and updating translator..."
+          python3 tools/patch_package.py pkgroot
+          echo "Repacking custom nullmoth-nvidia-1.14.2.tar.gz..."
+          tar -czf release-dist/nullmoth-nvidia-1.14.2.tar.gz pkgroot
+          CUSTOM_SHA=$(shasum -a 256 release-dist/nullmoth-nvidia-1.14.2.tar.gz | awk '{print $1}')
+          echo "CUSTOM_SHA=$CUSTOM_SHA" >> $GITHUB_ENV
+          echo "Generated custom driver payload with SHA256: $CUSTOM_SHA"
+
+      - name: Configure and Build 1401 Mac App
+        run: |
+          RELEASE_TAG="${{ github.event.inputs.release_tag || github.ref_name }}"
+          echo "Updating main.swift to point to CronoMail fork release tag: $RELEASE_TAG and SHA256: $CUSTOM_SHA"
+          sed -i '' "s|static let url = .*|static let url = URL(string: \"https://github.com/CronoMail/nvidia-macos-driver/releases/download/${RELEASE_TAG}/nullmoth-nvidia-1.14.2.tar.gz\")!|" app/Sources/main.swift
+          sed -i '' "s|static let sha256 = .*|static let sha256 = \"${CUSTOM_SHA}\"|" app/Sources/main.swift
+          grep -n "static let" app/Sources/main.swift
           bash app/build.sh
 
       - name: Package Release Assets
         run: |
-          mkdir -p release-dist
           cd app/build
           zip -ry ../../release-dist/1401-Mac-App.zip 1401.app
           cd ../..
           tar -czf release-dist/nvidia-macos-driver-source.tar.gz --exclude='.git' .
           cd release-dist
           shasum -a 256 * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
           cd ..
 
       - name: Create GitHub Release
@@ -59,13 +78,26 @@ jobs:
           tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
           name: "NVIDIA macOS Driver (Custom Build ${{ github.event.inputs.release_tag || github.ref_name }})"
           body: |
-            ### Custom Build with Fixes:
-            - **Small WindowServer Surfaces**: Bypassed shared-VRAM cache incoherency for sub-surfaces (< 8MB) to eliminate UI corruption and stale menus.
-            - **Multi-Monitor / Multi-Head Support**: Relaxed `heads piped` checks in `nvAccelCopyToScanout` and `nvAccelFlipTo` so 3-monitor setups are not blocked.
-            - **Scanout Copying**: Removed the artificial 120-frame copy cutoff that froze displays after 2 seconds.
-            - **Sub-Surface Transactions**: Supported variable and sub-surface geometry in `performTransaction`.
+            ### Custom Driver Build for AMD Ryzen + RTX 3060 (12GB) & Multi-Monitor
+
+            This release includes both the GUI installer (`1401-Mac-App.zip`) and the full binary driver payload (`nullmoth-nvidia-1.14.2.tar.gz`) patched for your hardware.
+
+            #### Hardware Fixes Included:
+            - **BAR1 Discovery Fix (RTX 3060)**: Lowered the minimum BAR1 aperture threshold from 256MB to 64MB across all checks in `NVRMFB` (`surveyBar1`, `kapiInit`, `discoverBar1`). Eliminates the `BAR survey: no BAR >= 256 MB` / `BAR1 metadata: 0 MB` stall at boot.
+            - **Multi-Monitor / Multi-Head Support**: Relaxed the `heads piped` checks in `NVAccel` (`nvAccelCopyToScanout` and `nvAccelFlipTo`) to support 3+ display heads on the RTX 3060 without refusing frames.
+            - **Eliminated 120-Frame Screen Freeze**: Removed the hardcoded 120-frame copy limit in `nvAccelCopyToScanout` that previously froze the display after 2 seconds.
+            - **Sub-Surface Transactions**: Bounds checks in `performTransaction` relaxed to accept variable sub-surfaces without failing the transaction.
+            - **Shader Translator**: Updated `libnvmtl_translate.dylib` compiled directly from source.
+            - **Self-Contained Installer**: `1401.app` is pre-configured to fetch and verify this custom `nullmoth-nvidia-1.14.2.tar.gz` payload rather than the upstream official repo.
+
+            #### OpenCore Configuration Requirements:
+            - **boot-args**: `nvfb=1 nvaccel=1 nvfbheads=4 -nvkmsnosmooth -nvrmnoflip amfi_get_out_of_my_way=0x1 amfi=0x80 ipc_control_port_options=0`
+            - **ResizeAppleGpuBars**: `13` (8 GB) or `-1` (Do **NOT** set to 16 GB, as 16GB exceeds the 12GB VRAM of the RTX 3060).
+            - **Kernel > Block**: Exclude `com.apple.iokit.IONDRVSupport`.
+            - **SIP (`csr-active-config`)**: `<430A0000>`
           files: |
             release-dist/1401-Mac-App.zip
+            release-dist/nullmoth-nvidia-1.14.2.tar.gz
             release-dist/nvidia-macos-driver-source.tar.gz
             release-dist/SHA256SUMS.txt
         env:

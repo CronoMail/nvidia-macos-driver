@@ -11,7 +11,7 @@ import UniformTypeIdentifiers
 struct Package {
     static let version = "1.14.2"
     static let name = "nullmoth-nvidia-1.14.2.tar.gz"
-    static let url = URL(string: "https://github.com/nullmoth/nvidia-macos-driver/releases/download/v1.14.2/nullmoth-nvidia-1.14.2.tar.gz")!
+    static let url = URL(string: "https://github.com/CronoMail/nvidia-macos-driver/releases/download/v1.14.2-custom/nullmoth-nvidia-1.14.2.tar.gz")!
     static let sha256 = "7c7f7ac97dbcdd48786d4384ffcb2d19199b6d3bc0fb013c71f63b766dea6be5"
 }
 let uploadPage = URL(string: "https://nullmothsystems.com/#send")!
