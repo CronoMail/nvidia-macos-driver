@@ -546,9 +546,9 @@ void NVRMNVDAFramebuffer::surveyBar1()
     for (IOItemCount i = 0; i < n; i++) {
         IOMemoryDescriptor *m = nub->getDeviceMemoryWithIndex(i);
         if (!m) continue;
-        if (m->getLength() >= 0x10000000ull) { bar = m; barPa = m->getPhysicalSegment(0, 0, kIOMemoryMapperNone); break; }
+        if (m->getLength() >= 0x04000000ull) { bar = m; barPa = m->getPhysicalSegment(0, 0, kIOMemoryMapperNone); break; }
     }
-    if (!bar) { FBLOG("BAR survey: no BAR >= 256 MB"); return; }
+    if (!bar) { FBLOG("BAR survey: no BAR >= 64 MB"); return; }
     fBarLen = bar->getLength(); fBar1Base = (NvU64)barPa;
     FBLOG("BAR survey: mapping ALL of BAR1 pa 0x%llx len %llu MB", fBar1Base, fBarLen >> 20);
     fBarMem = IOSubMemoryDescriptor::withSubRange(bar, 0, (IOByteCount)fBarLen, kIODirectionNone);
@@ -913,7 +913,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
             addr64_t pa = m->getPhysicalSegment(0, 0, kIOMemoryMapperNone);
             FBLOG("BAR%u: pa 0x%llx len %llu", (unsigned)i, (unsigned long long)pa,
                   (unsigned long long)m->getLength());
-            if (m->getLength() >= 0x10000000ull && !fBar1Base) fBar1Base = (NvU64)pa;
+            if (m->getLength() >= 0x04000000ull && !fBar1Base) fBar1Base = (NvU64)pa;
         }
     }
     if (fConsoleAperture && fBar1Base) {
@@ -1721,7 +1721,7 @@ static void nvrmDiscoverBar1(IOService *provider, NvU64 *length, NvU64 *base)
         const IOItemCount count = nub->getDeviceMemoryCount();
         for (IOItemCount i = 0; i < count; i++) {
             IOMemoryDescriptor *memory = nub->getDeviceMemoryWithIndex(i);
-            if (!memory || memory->getLength() < 0x10000000ull) continue;
+            if (!memory || memory->getLength() < 0x04000000ull) continue;
             *length = memory->getLength();
             *base = memory->getPhysicalSegment(0, 0, kIOMemoryMapperNone);
             return;
