@@ -40,7 +40,7 @@ jobs:
 
       - name: Build 1401 Mac App
         run: |
-          bash app/build.sh app/build
+          bash app/build.sh
 
       - name: Package Release Assets
         run: |
